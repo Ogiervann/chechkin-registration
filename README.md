@@ -1,3 +1,17 @@
+Coverage
+```
+make clean # если ранее запускали просто make
+make coverage
+./test.sh
+lcov --capture --directory . --no-external --output-file coverage.info
+.github/coverage.sh
+```
+
+
+Написать серверную часть "регистрации + входа в систему" с помощью HTTPLib
+
+
+
 # Шаблон программы на языке C без тестирования
 
 Заготовка программы находится в файле `main.c`.
