@@ -28,6 +28,8 @@ DEPS := $(shell find -name "*.d")
 -include $(DEPS)
 
 clean:
+	rm -f server
+	rm -f client
 	rm -f main
 	rm -f *.o
 	rm -f *.d

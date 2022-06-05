@@ -1,5 +1,7 @@
 a.out
 main
+server
+client
 __pycache__
 *.o
 *.d

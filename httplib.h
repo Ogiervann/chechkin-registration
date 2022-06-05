@@ -1,12 +1,14 @@
 //
 //  httplib.h
 //
-//  Copyright (c) 2021 Yuji Hirose. All rights reserved.
+//  Copyright (c) 2022 Yuji Hirose. All rights reserved.
 //  MIT License
 //
 
 #ifndef CPPHTTPLIB_HTTPLIB_H
 #define CPPHTTPLIB_HTTPLIB_H
+
+#define CPPHTTPLIB_VERSION "0.10.7"
 
 /*
  * Configuration
@@ -70,6 +72,10 @@
 
 #ifndef CPPHTTPLIB_PAYLOAD_MAX_LENGTH
 #define CPPHTTPLIB_PAYLOAD_MAX_LENGTH ((std::numeric_limits<size_t>::max)())
+#endif
+
+#ifndef CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH
+#define CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH 8192
 #endif
 
 #ifndef CPPHTTPLIB_TCP_NODELAY
@@ -142,8 +148,6 @@ using ssize_t = int;
 
 #include <io.h>
 #include <winsock2.h>
-
-#include <wincrypt.h>
 #include <ws2tcpip.h>
 
 #ifndef WSA_FLAG_NO_HANDLE_INHERIT
@@ -152,8 +156,6 @@ using ssize_t = int;
 
 #ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "crypt32.lib")
-#pragma comment(lib, "cryptui.lib")
 #endif
 
 #ifndef strcasecmp
@@ -168,8 +170,8 @@ using socket_t = SOCKET;
 #else // not _WIN32
 
 #include <arpa/inet.h>
-#include <cstring>
 #include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #ifdef __linux__
@@ -191,6 +193,7 @@ using socket_t = int;
 #endif
 #endif //_WIN32
 
+#include <cstring>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -217,17 +220,24 @@ using socket_t = int;
 #include <thread>
 
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+#ifdef _WIN32
+#include <wincrypt.h>
+
 // these are defined in wincrypt.h and it breaks compilation if BoringSSL is
 // used
-#ifdef _WIN32
 #undef X509_NAME
 #undef X509_CERT_PAIR
 #undef X509_EXTENSIONS
 #undef PKCS7_SIGNER_INFO
+
+#ifdef _MSC_VER
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "cryptui.lib")
 #endif
+#endif //_WIN32
 
 #include <openssl/err.h>
-#include <openssl/md5.h>
+#include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 
@@ -973,7 +983,7 @@ public:
 
   void stop();
 
-  void set_hostname_addr_map(const std::map<std::string, std::string> addr_map);
+  void set_hostname_addr_map(std::map<std::string, std::string> addr_map);
 
   void set_default_headers(Headers headers);
 
@@ -1308,7 +1318,7 @@ public:
 
   void stop();
 
-  void set_hostname_addr_map(const std::map<std::string, std::string> addr_map);
+  void set_hostname_addr_map(std::map<std::string, std::string> addr_map);
 
   void set_default_headers(Headers headers);
 
@@ -2649,11 +2659,14 @@ inline bool bind_ip_address(socket_t sock, const char *host) {
 #endif
 
 #ifdef USE_IF2IP
-inline std::string if2ip(const std::string &ifn) {
+inline std::string if2ip(int address_family, const std::string &ifn) {
   struct ifaddrs *ifap;
   getifaddrs(&ifap);
+  std::string addr_candidate;
   for (auto ifa = ifap; ifa; ifa = ifa->ifa_next) {
-    if (ifa->ifa_addr && ifn == ifa->ifa_name) {
+    if (ifa->ifa_addr && ifn == ifa->ifa_name &&
+        (AF_UNSPEC == address_family ||
+         ifa->ifa_addr->sa_family == address_family)) {
       if (ifa->ifa_addr->sa_family == AF_INET) {
         auto sa = reinterpret_cast<struct sockaddr_in *>(ifa->ifa_addr);
         char buf[INET_ADDRSTRLEN];
@@ -2661,11 +2674,26 @@ inline std::string if2ip(const std::string &ifn) {
           freeifaddrs(ifap);
           return std::string(buf, INET_ADDRSTRLEN);
         }
+      } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+        auto sa = reinterpret_cast<struct sockaddr_in6 *>(ifa->ifa_addr);
+        if (!IN6_IS_ADDR_LINKLOCAL(&sa->sin6_addr)) {
+          char buf[INET6_ADDRSTRLEN] = {};
+          if (inet_ntop(AF_INET6, &sa->sin6_addr, buf, INET6_ADDRSTRLEN)) {
+            // equivalent to mac's IN6_IS_ADDR_UNIQUE_LOCAL
+            auto s6_addr_head = sa->sin6_addr.s6_addr[0];
+            if (s6_addr_head == 0xfc || s6_addr_head == 0xfd) {
+              addr_candidate = std::string(buf, INET6_ADDRSTRLEN);
+            } else {
+              freeifaddrs(ifap);
+              return std::string(buf, INET6_ADDRSTRLEN);
+            }
+          }
+        }
       }
     }
   }
   freeifaddrs(ifap);
-  return std::string();
+  return addr_candidate;
 }
 #endif
 
@@ -2680,9 +2708,9 @@ inline socket_t create_client_socket(
       [&](socket_t sock2, struct addrinfo &ai) -> bool {
         if (!intf.empty()) {
 #ifdef USE_IF2IP
-          auto ip = if2ip(intf);
-          if (ip.empty()) { ip = intf; }
-          if (!bind_ip_address(sock2, ip.c_str())) {
+          auto ip_from_if = if2ip(address_family, intf);
+          if (ip_from_if.empty()) { ip_from_if = intf; }
+          if (!bind_ip_address(sock2, ip_from_if.c_str())) {
             error = Error::BindIPAddress;
             return false;
           }
@@ -3752,10 +3780,11 @@ public:
   bool parse(const char *buf, size_t n, const ContentReceiver &content_callback,
              const MultipartContentHeader &header_callback) {
 
+    // TODO: support 'filename*'
     static const std::regex re_content_disposition(
-        "^Content-Disposition:\\s*form-data;\\s*name=\"(.*?)\"(?:;\\s*filename="
-        "\"(.*?)\")?\\s*$",
+        R"~(^Content-Disposition:\s*form-data;\s*name="(.*?)"(?:;\s*filename="(.*?)")?(?:;\s*filename\*=\S+)?\s*$)~",
         std::regex_constants::icase);
+
     static const std::string dash_ = "--";
     static const std::string crlf_ = "\r\n";
 
@@ -4145,36 +4174,36 @@ inline bool has_crlf(const char *s) {
 }
 
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-template <typename CTX, typename Init, typename Update, typename Final>
-inline std::string message_digest(const std::string &s, Init init,
-                                  Update update, Final final,
-                                  size_t digest_length) {
-  std::vector<unsigned char> md(digest_length, 0);
-  CTX ctx;
-  init(&ctx);
-  update(&ctx, s.data(), s.size());
-  final(md.data(), &ctx);
+inline std::string message_digest(const std::string &s, const EVP_MD *algo) {
+  auto context = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>(
+      EVP_MD_CTX_new(), EVP_MD_CTX_free);
+
+  unsigned int hash_length = 0;
+  unsigned char hash[EVP_MAX_MD_SIZE];
+
+  EVP_DigestInit_ex(context.get(), algo, nullptr);
+  EVP_DigestUpdate(context.get(), s.c_str(), s.size());
+  EVP_DigestFinal_ex(context.get(), hash, &hash_length);
 
   std::stringstream ss;
-  for (auto c : md) {
-    ss << std::setfill('0') << std::setw(2) << std::hex << (unsigned int)c;
+  for (auto i = 0u; i < hash_length; ++i) {
+    ss << std::hex << std::setw(2) << std::setfill('0')
+       << (unsigned int)hash[i];
   }
+
   return ss.str();
 }
 
 inline std::string MD5(const std::string &s) {
-  return message_digest<MD5_CTX>(s, MD5_Init, MD5_Update, MD5_Final,
-                                 MD5_DIGEST_LENGTH);
+  return message_digest(s, EVP_md5());
 }
 
 inline std::string SHA_256(const std::string &s) {
-  return message_digest<SHA256_CTX>(s, SHA256_Init, SHA256_Update, SHA256_Final,
-                                    SHA256_DIGEST_LENGTH);
+  return message_digest(s, EVP_sha256());
 }
 
 inline std::string SHA_512(const std::string &s) {
-  return message_digest<SHA512_CTX>(s, SHA512_Init, SHA512_Update, SHA512_Final,
-                                    SHA512_DIGEST_LENGTH);
+  return message_digest(s, EVP_sha512());
 }
 #endif
 
@@ -4211,10 +4240,14 @@ class WSInit {
 public:
   WSInit() {
     WSADATA wsaData;
-    WSAStartup(0x0002, &wsaData);
+    if (WSAStartup(0x0002, &wsaData) == 0) is_valid_ = true;
   }
 
-  ~WSInit() { WSACleanup(); }
+  ~WSInit() {
+    if (is_valid_) WSACleanup();
+  }
+
+  bool is_valid_ = false;
 };
 
 static WSInit wsinit_;
@@ -4658,7 +4691,7 @@ inline ssize_t SocketStream::read(char *ptr, size_t size) {
 inline ssize_t SocketStream::write(const char *ptr, size_t size) {
   if (!is_writable()) { return -1; }
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_WIN64)
   size =
       (std::min)(size, static_cast<size_t>((std::numeric_limits<int>::max)()));
 #endif
@@ -4965,6 +4998,14 @@ inline bool Server::parse_request_line(const char *s, Request &req) {
   if (req.version != "HTTP/1.1" && req.version != "HTTP/1.0") { return false; }
 
   {
+    // Skip URL fragment
+    for (size_t i = 0; i < req.target.size(); i++) {
+      if (req.target[i] == '#') {
+        req.target.erase(i);
+        break;
+      }
+    }
+
     size_t count = 0;
 
     detail::split(req.target.data(), req.target.data() + req.target.size(), '?',
@@ -5152,7 +5193,7 @@ inline bool Server::read_content(Stream &strm, Request &req, Response &res) {
           })) {
     const auto &content_type = req.get_header_value("Content-Type");
     if (!content_type.find("application/x-www-form-urlencoded")) {
-      if (req.body.size() > CPPHTTPLIB_REQUEST_URI_MAX_LENGTH) {
+      if (req.body.size() > CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH) {
         res.status = 413; // NOTE: should be 414?
         return false;
       }
@@ -6162,7 +6203,8 @@ inline bool ClientImpl::write_request(Stream &strm, Request &req,
 
 #ifndef CPPHTTPLIB_NO_DEFAULT_USER_AGENT
   if (!req.has_header("User-Agent")) {
-    req.headers.emplace("User-Agent", "cpp-httplib/0.10.3");
+    auto agent = std::string("cpp-httplib/") + CPPHTTPLIB_VERSION;
+    req.headers.emplace("User-Agent", agent);
   }
 #endif
 
@@ -6278,8 +6320,8 @@ inline std::unique_ptr<Response> ClientImpl::send_with_content_provider(
           auto last = offset + data_len == content_length;
 
           auto ret = compressor.compress(
-              data, data_len, last, [&](const char *data, size_t data_len) {
-                req.body.append(data, data_len);
+              data, data_len, last, [&](const char *compressed_data, size_t compressed_data_len) {
+                req.body.append(compressed_data, compressed_data_len);
                 return true;
               });
 
@@ -6940,8 +6982,8 @@ inline void ClientImpl::set_follow_location(bool on) { follow_location_ = on; }
 
 inline void ClientImpl::set_url_encode(bool on) { url_encode_ = on; }
 
-inline void ClientImpl::set_hostname_addr_map(
-    const std::map<std::string, std::string> addr_map) {
+inline void
+ClientImpl::set_hostname_addr_map(std::map<std::string, std::string> addr_map) {
   addr_map_ = std::move(addr_map);
 }
 
@@ -7184,62 +7226,63 @@ inline bool SSLSocketStream::is_writable() const {
 }
 
 inline ssize_t SSLSocketStream::read(char *ptr, size_t size) {
+  size_t readbytes = 0;
   if (SSL_pending(ssl_) > 0) {
-    return SSL_read(ssl_, ptr, static_cast<int>(size));
-  } else if (is_readable()) {
-    auto ret = SSL_read(ssl_, ptr, static_cast<int>(size));
-    if (ret < 0) {
-      auto err = SSL_get_error(ssl_, ret);
-      int n = 1000;
-#ifdef _WIN32
-      while (--n >= 0 && (err == SSL_ERROR_WANT_READ ||
-                          (err == SSL_ERROR_SYSCALL &&
-                           WSAGetLastError() == WSAETIMEDOUT))) {
-#else
-      while (--n >= 0 && err == SSL_ERROR_WANT_READ) {
-#endif
-        if (SSL_pending(ssl_) > 0) {
-          return SSL_read(ssl_, ptr, static_cast<int>(size));
-        } else if (is_readable()) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          ret = SSL_read(ssl_, ptr, static_cast<int>(size));
-          if (ret >= 0) { return ret; }
-          err = SSL_get_error(ssl_, ret);
-        } else {
-          return -1;
-        }
-      }
-    }
-    return ret;
+    auto ret = SSL_read_ex(ssl_, ptr, size, &readbytes);
+    if (ret == 1) { return static_cast<ssize_t>(readbytes); }
+    if (SSL_get_error(ssl_, ret) == SSL_ERROR_ZERO_RETURN) { return 0; }
+    return -1;
   }
+  if (!is_readable()) { return -1; }
+
+  auto ret = SSL_read_ex(ssl_, ptr, size, &readbytes);
+  if (ret == 1) { return static_cast<ssize_t>(readbytes); }
+  auto err = SSL_get_error(ssl_, ret);
+  int n = 1000;
+#ifdef _WIN32
+  while (--n >= 0 &&
+         (err == SSL_ERROR_WANT_READ ||
+          (err == SSL_ERROR_SYSCALL && WSAGetLastError() == WSAETIMEDOUT))) {
+#else
+  while (--n >= 0 && err == SSL_ERROR_WANT_READ) {
+#endif
+    if (SSL_pending(ssl_) > 0) {
+      ret = SSL_read_ex(ssl_, ptr, size, &readbytes);
+      if (ret == 1) { return static_cast<ssize_t>(readbytes); }
+      if (SSL_get_error(ssl_, ret) == SSL_ERROR_ZERO_RETURN) { return 0; }
+      return -1;
+    }
+    if (!is_readable()) { return -1; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ret = SSL_read_ex(ssl_, ptr, size, &readbytes);
+    if (ret == 1) { return static_cast<ssize_t>(readbytes); }
+    err = SSL_get_error(ssl_, ret);
+  }
+  if (err == SSL_ERROR_ZERO_RETURN) { return 0; }
   return -1;
 }
 
 inline ssize_t SSLSocketStream::write(const char *ptr, size_t size) {
-  if (is_writable()) {
-    auto ret = SSL_write(ssl_, ptr, static_cast<int>(size));
-    if (ret < 0) {
-      auto err = SSL_get_error(ssl_, ret);
-      int n = 1000;
+  if (!is_writable()) { return -1; }
+  size_t written = 0;
+  auto ret = SSL_write_ex(ssl_, ptr, size, &written);
+  if (ret == 1) { return static_cast<ssize_t>(written); }
+  auto err = SSL_get_error(ssl_, ret);
+  int n = 1000;
 #ifdef _WIN32
-      while (--n >= 0 && (err == SSL_ERROR_WANT_WRITE ||
-                          (err == SSL_ERROR_SYSCALL &&
-                           WSAGetLastError() == WSAETIMEDOUT))) {
+  while (--n >= 0 &&
+         (err == SSL_ERROR_WANT_WRITE ||
+          (err == SSL_ERROR_SYSCALL && WSAGetLastError() == WSAETIMEDOUT))) {
 #else
-      while (--n >= 0 && err == SSL_ERROR_WANT_WRITE) {
+  while (--n >= 0 && err == SSL_ERROR_WANT_WRITE) {
 #endif
-        if (is_writable()) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          ret = SSL_write(ssl_, ptr, static_cast<int>(size));
-          if (ret >= 0) { return ret; }
-          err = SSL_get_error(ssl_, ret);
-        } else {
-          return -1;
-        }
-      }
-    }
-    return ret;
+    if (!is_writable()) { return -1; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ret = SSL_write_ex(ssl_, ptr, size, &written);
+    if (ret == 1) { return static_cast<ssize_t>(written); }
+    err = SSL_get_error(ssl_, ret);
   }
+  if (err == SSL_ERROR_ZERO_RETURN) { return 0; }
   return -1;
 }
 
@@ -7269,8 +7312,9 @@ inline SSLServer::SSLServer(const char *cert_path, const char *private_key_path,
     SSL_CTX_set_min_proto_version(ctx_, TLS1_1_VERSION);
 
     // add default password callback before opening encrypted private key
-    if (private_key_password != nullptr && (private_key_password[0] != '\0') ) {
-      SSL_CTX_set_default_passwd_cb_userdata(ctx_, (char *)private_key_password);
+    if (private_key_password != nullptr && (private_key_password[0] != '\0')) {
+      SSL_CTX_set_default_passwd_cb_userdata(ctx_,
+                                             (char *)private_key_password);
     }
 
     if (SSL_CTX_use_certificate_chain_file(ctx_, cert_path) != 1 ||
@@ -7334,11 +7378,11 @@ inline SSL_CTX *SSLServer::ssl_context() const { return ctx_; }
 inline bool SSLServer::process_and_close_socket(socket_t sock) {
   auto ssl = detail::ssl_new(
       sock, ctx_, ctx_mutex_,
-      [&](SSL *ssl) {
+      [&](SSL *ssl2) {
         return detail::ssl_connect_or_accept_nonblocking(
-            sock, ssl, SSL_accept, read_timeout_sec_, read_timeout_usec_);
+            sock, ssl2, SSL_accept, read_timeout_sec_, read_timeout_usec_);
       },
-      [](SSL * /*ssl*/) { return true; });
+      [](SSL * /*ssl2*/) { return true; });
 
   bool ret = false;
   if (ssl) {
@@ -7532,31 +7576,31 @@ inline bool SSLClient::load_certs() {
 inline bool SSLClient::initialize_ssl(Socket &socket, Error &error) {
   auto ssl = detail::ssl_new(
       socket.sock, ctx_, ctx_mutex_,
-      [&](SSL *ssl) {
+      [&](SSL *ssl2) {
         if (server_certificate_verification_) {
           if (!load_certs()) {
             error = Error::SSLLoadingCerts;
             return false;
           }
-          SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
+          SSL_set_verify(ssl2, SSL_VERIFY_NONE, nullptr);
         }
 
         if (!detail::ssl_connect_or_accept_nonblocking(
-                socket.sock, ssl, SSL_connect, connection_timeout_sec_,
+                socket.sock, ssl2, SSL_connect, connection_timeout_sec_,
                 connection_timeout_usec_)) {
           error = Error::SSLConnection;
           return false;
         }
 
         if (server_certificate_verification_) {
-          verify_result_ = SSL_get_verify_result(ssl);
+          verify_result_ = SSL_get_verify_result(ssl2);
 
           if (verify_result_ != X509_V_OK) {
             error = Error::SSLServerVerification;
             return false;
           }
 
-          auto server_cert = SSL_get_peer_certificate(ssl);
+          auto server_cert = SSL_get_peer_certificate(ssl2);
 
           if (server_cert == nullptr) {
             error = Error::SSLServerVerification;
@@ -7573,8 +7617,8 @@ inline bool SSLClient::initialize_ssl(Socket &socket, Error &error) {
 
         return true;
       },
-      [&](SSL *ssl) {
-        SSL_set_tlsext_host_name(ssl, host_.c_str());
+      [&](SSL *ssl2) {
+        SSL_set_tlsext_host_name(ssl2, host_.c_str());
         return true;
       });
 
@@ -8065,8 +8109,8 @@ inline size_t Client::is_socket_open() const { return cli_->is_socket_open(); }
 
 inline void Client::stop() { cli_->stop(); }
 
-inline void Client::set_hostname_addr_map(
-    const std::map<std::string, std::string> addr_map) {
+inline void
+Client::set_hostname_addr_map(std::map<std::string, std::string> addr_map) {
   cli_->set_hostname_addr_map(std::move(addr_map));
 }
 
