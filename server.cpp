@@ -52,18 +52,21 @@ std::vector<BYTE> base64_decode(std::string const &encoded_string)
                               ((char_array_4[2] & 0x3c) >> 2);
             char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
 
-            for (i = 0; (i < 3); i++)
+            for (i = 0; (i < 3); i++){
                 ret.push_back(char_array_3[i]);
+            }
             i = 0;
         }
     }
 
-    if (i) {
-        for (j = i; j < 4; j++)
+    if (i != 0) {
+        for (j = i; j < 4; j++){
             char_array_4[j] = 0;
+        }
 
-        for (j = 0; j < 4; j++)
+        for (j = 0; j < 4; j++){
             char_array_4[j] = base64_chars.find(char_array_4[j]);
+        }
 
         char_array_3[0] =
             (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
@@ -71,8 +74,9 @@ std::vector<BYTE> base64_decode(std::string const &encoded_string)
             ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
         char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
 
-        for (j = 0; (j < i - 1); j++)
+        for (j = 0; (j < i - 1); j++){
             ret.push_back(char_array_3[j]);
+        }
     }
 
     return ret;
@@ -93,14 +97,14 @@ int main()
 
     svr.Get("/login", [&](const httplib::Request &req, httplib::Response &res) {
         // std::cout << req.remote_port << " " << res.status << std::endl;
-        std::string s = "";
-        for (auto value : req.headers) {
+        std::string s;
+        for (auto const & value : req.headers) {
             // std::cout << value.first << " " <<value.second << std::endl;
             if (value.first == "Authorization") {
                 s = value.second;
             }
         }
-        if (s != "") {
+        if (! s.empty()) {
             if (!logged) {
                 s = s.erase(0, 6);
                 // std::cout << s << std::endl;
@@ -108,7 +112,7 @@ int main()
                 // std::cout << data1.data() << std::endl;
                 std::string data(reinterpret_cast<const char *>(data1.data()));
                 // std::cout << data << std::endl;
-                int pos = data.find(":");
+                int pos = data.find(':');
                 std::string login = data.substr(0, pos);
                 std::string password = data.erase(0, pos + 1);
                 std::cout << login << " " << password << std::endl;
