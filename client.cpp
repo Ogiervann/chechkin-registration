@@ -4,7 +4,7 @@
 #include <map>
 #include <string>
 
-int main(int argc, char **argv)
+int main(int /*unused*/, char **argv)
 {
     httplib::Client cli("0.0.0.0:8080");
 

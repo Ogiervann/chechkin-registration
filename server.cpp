@@ -22,7 +22,7 @@ const char *REGISTER_PAGE = R"REGISTER_PAGE(
 
 static inline bool is_base64(BYTE c)
 {
-    return (isalnum(c) || (c == '+') || (c == '/'));
+    return (isalnum(c) != 0 || (c == '+') || (c == '/'));
 }
 
 std::vector<BYTE> base64_decode(std::string const &encoded_string)
@@ -34,17 +34,18 @@ std::vector<BYTE> base64_decode(std::string const &encoded_string)
     int i = 0;
     int j = 0;
     int in_ = 0;
-    BYTE char_array_4[4], char_array_3[3];
+    BYTE char_array_4[4];
+    BYTE char_array_3[3];
     std::vector<BYTE> ret;
 
-    while (in_len-- && (encoded_string[in_] != '=') &&
+    while ((in_len--) != 0 && (encoded_string[in_] != '=') &&
            is_base64(encoded_string[in_])) {
         char_array_4[i++] = encoded_string[in_];
         in_++;
         if (i == 4) {
-            for (i = 0; i < 4; i++)
+            for (i = 0; i < 4; i++) {
                 char_array_4[i] = base64_chars.find(char_array_4[i]);
-
+            }
             char_array_3[0] =
                 (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
             char_array_3[1] = ((char_array_4[1] & 0xf) << 4) +
@@ -113,7 +114,7 @@ int main()
                 std::cout << login << " " << password << std::endl;
                 // std::cout << "stuff\n";
 
-                for (auto p : known_users) {
+                for (auto const &p : known_users) {
                     if (p.first == login && p.second == password) {
                         std::cout << "logged\n";
                         res.status = 200;
@@ -139,20 +140,22 @@ int main()
     });
 
     // Завершить работу пользователя
-    svr.Get("/logout", [&](const httplib::Request &, httplib::Response &res) {
-        //  std::cout << res.status << std::endl;
-        res.set_content("Logged out.", "text/plain");
-        logged = false;
-        res.status = 401;
-    });
+    svr.Get("/logout",
+            [&](const httplib::Request & /*unused*/, httplib::Response &res) {
+                //  std::cout << res.status << std::endl;
+                res.set_content("Logged out.", "text/plain");
+                logged = false;
+                res.status = 401;
+            });
 
     // Вывести форму регистрации
-    svr.Get("/register", [](const httplib::Request &, httplib::Response &res) {
-        //  std::cout << res.status << std::endl;
+    svr.Get("/register",
+            [](const httplib::Request & /*unused*/, httplib::Response &res) {
+                //  std::cout << res.status << std::endl;
 
-        std::cout << "In GET handler" << std::endl;
-        res.set_content(REGISTER_PAGE, "text/html");
-    });
+                std::cout << "In GET handler" << std::endl;
+                res.set_content(REGISTER_PAGE, "text/html");
+            });
 
     // Обработать отправку формы регистрации
     svr.Post("/register",
@@ -163,7 +166,7 @@ int main()
                  httplib::Params params;
                  httplib::detail::parse_query_text(req.body, params);
                  std::pair<std::string, std::string> usr;
-                 for (auto p : params) {
+                 for (auto const &p : params) {
                      std::cout << p.first << " = " << p.second << std::endl;
                      if (p.first == "login") {
                          usr.first = p.second;
